@@ -56,6 +56,16 @@ export interface Person {
   licenseExpiry: string | null
 }
 
+export type ClientSafetyStatus = 'not_required' | 'pending_notify' | 'notified' | 'confirmed' | 'absent'
+
+export const CLIENT_SAFETY_STATUS_LABELS: Record<ClientSafetyStatus, string> = {
+  not_required: '无需到场',
+  pending_notify: '待通知',
+  notified: '已通知',
+  confirmed: '已到场确认',
+  absent: '未到场',
+}
+
 export interface RiskRecord {
   id: string
   date: string
@@ -79,8 +89,15 @@ export interface RiskRecord {
   createdAt: string
   reviewedBy?: string
   reviewedAt?: string
+
   needClientSafety: boolean
-  clientSafetyNotified?: boolean
+  clientSafetyStatus: ClientSafetyStatus
+  clientSafetyNotifyTime?: string
+  clientSafetyNotifyPerson?: string
+  clientSafetyConfirmTime?: string
+  clientSafetyConfirmPerson?: string
+  clientSafetyAbsentReason?: string
+
   remarks?: string
   issues: RiskIssue[]
 }
@@ -91,13 +108,15 @@ export type RiskIssue =
   | 'license_mismatch'
   | 'overdue'
   | 'no_permit'
+  | 'permit_expired'
 
 export const RISK_ISSUE_LABELS: Record<RiskIssue, string> = {
   out_of_scope: '超范围作业',
-  permit_expiring: '许可证即将过期',
-  license_mismatch: '人员证照不匹配',
+  permit_expiring: '许可证即将过期(24h内)',
+  license_mismatch: '人员证照不匹配/过期',
   overdue: '已超时未关闭',
   no_permit: '未取得作业许可证',
+  permit_expired: '许可证已过期',
 }
 
 export interface AppState {

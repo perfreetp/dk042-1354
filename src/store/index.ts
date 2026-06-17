@@ -8,9 +8,12 @@ import type {
   Contract,
   Person,
   RiskRecord,
+  RiskIssue,
+  ClientSafetyStatus,
 } from '@/types'
 
 const today = new Date().toISOString().split('T')[0]
+const nowIso = new Date().toISOString()
 
 const sampleAirlines: Airline[] = [
   { id: 'al-1', name: '中国国际航空', code: 'CA' },
@@ -78,7 +81,7 @@ const samplePeople: Person[] = [
     name: '李强',
     employeeId: 'EMP002',
     qualifications: ['结构维修证'],
-    licenseExpiry: '2025-07-20',
+    licenseExpiry: '2026-07-20',
   },
   {
     id: 'p-3',
@@ -92,7 +95,7 @@ const samplePeople: Person[] = [
     name: '刘洋',
     employeeId: 'EMP004',
     qualifications: ['喷漆作业证'],
-    licenseExpiry: '2025-06-25',
+    licenseExpiry: '2026-06-25',
   },
   {
     id: 'p-5',
@@ -102,6 +105,86 @@ const samplePeople: Person[] = [
     licenseExpiry: '2026-08-10',
   },
 ]
+
+function addHours(iso: string, hours: number): string {
+  const d = new Date(iso)
+  d.setHours(d.getHours() + hours)
+  return d.toISOString()
+}
+
+function getDefaultClientSafetyStatus(needClient: boolean): ClientSafetyStatus {
+  return needClient ? 'pending_notify' : 'not_required'
+}
+
+export function detectIssuesAuto(
+  record: Omit<RiskRecord, 'id' | 'createdAt'> | RiskRecord,
+  referenceNow?: Date
+): RiskIssue[] {
+  const now = referenceNow || new Date()
+  const detected: Set<RiskIssue> = new Set()
+
+  // 未取得作业许可证（喷漆、打磨、清洗、结构必须有）
+  if (record.workType !== 'other') {
+    if (!record.permitNumber || record.permitNumber.trim() === '') {
+      detected.add('no_permit')
+    }
+  }
+
+  // 许可证过期/临期
+  if (record.permitExpiry) {
+    try {
+      const expiry = new Date(record.permitExpiry)
+      const diffMs = expiry.getTime() - now.getTime()
+      const diffHours = diffMs / (1000 * 60 * 60)
+      if (diffMs < 0) {
+        detected.add('permit_expired')
+      } else if (diffHours <= 24) {
+        detected.add('permit_expiring')
+      }
+    } catch {
+      /* ignore */
+    }
+  } else if (record.permitNumber && record.permitNumber.trim()) {
+    // 有许可证编号但无过期时间也算临期/信息缺失的异常
+    detected.add('permit_expiring')
+  }
+
+  // 超时未关闭
+  if (record.status !== 'closed' && record.estimatedEndTime) {
+    try {
+      const end = new Date(record.estimatedEndTime)
+      if (end.getTime() < now.getTime()) {
+        detected.add('overdue')
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 人员证照不匹配/过期（30天内过期 或 已过期）
+  if (record.workers && record.workers.length > 0) {
+    for (const w of record.workers) {
+      if (!w.licenseExpiry) continue
+      try {
+        const exp = new Date(w.licenseExpiry)
+        const diffDays = (exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+        if (diffDays <= 30) {
+          detected.add('license_mismatch')
+          break
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // 保留用户手工标记的 out_of_scope
+  if (record.issues && record.issues.includes('out_of_scope')) {
+    detected.add('out_of_scope')
+  }
+
+  return Array.from(detected)
+}
 
 const sampleRisks: RiskRecord[] = [
   {
@@ -116,19 +199,23 @@ const sampleRisks: RiskRecord[] = [
     description: 'B737-800机身蒙皮重新喷漆，涉及易燃易爆涂料作业',
     workers: [samplePeople[0], samplePeople[3]],
     permitNumber: 'PT-2026-0617-001',
-    permitExpiry: '2026-06-17T18:00:00',
+    permitExpiry: addHours(nowIso, 9),
     isolationMeasures:
       '1. 喷漆区设置防火隔离带；2. 配备2台干粉灭火器；3. 禁止明火作业；4. 接地防静电',
-    estimatedEndTime: '2026-06-17T17:30:00',
+    estimatedEndTime: addHours(nowIso, 8),
     riskLevel: 'high',
     status: 'in_progress',
     team: '喷漆一组',
     createdBy: '张伟',
-    createdAt: '2026-06-17T08:00:00',
+    createdAt: nowIso,
     reviewedBy: '项目经理',
-    reviewedAt: '2026-06-17T08:30:00',
+    reviewedAt: nowIso,
     needClientSafety: true,
-    clientSafetyNotified: true,
+    clientSafetyStatus: 'confirmed',
+    clientSafetyNotifyTime: addHours(nowIso, -2),
+    clientSafetyNotifyPerson: '项目经理',
+    clientSafetyConfirmTime: addHours(nowIso, -1),
+    clientSafetyConfirmPerson: '王安全员(CA)',
     issues: [],
   },
   {
@@ -143,20 +230,22 @@ const sampleRisks: RiskRecord[] = [
     description: 'A320机翼前缘蒙皮铆钉更换，涉及高处作业和结构拆装',
     workers: [samplePeople[1], samplePeople[4]],
     permitNumber: 'PT-2026-0617-002',
-    permitExpiry: '2026-06-17T20:00:00',
+    permitExpiry: addHours(nowIso, 12),
     isolationMeasures:
       '1. 设置警戒区域；2. 高空作业系安全带；3. 工具防坠落措施；4. 下方禁止人员通行',
-    estimatedEndTime: '2026-06-17T18:00:00',
+    estimatedEndTime: addHours(nowIso, 10),
     riskLevel: 'high',
     status: 'in_progress',
     team: '结构二组',
     createdBy: '李强',
-    createdAt: '2026-06-17T07:45:00',
+    createdAt: nowIso,
     reviewedBy: '项目经理',
-    reviewedAt: '2026-06-17T08:15:00',
+    reviewedAt: nowIso,
     needClientSafety: true,
-    clientSafetyNotified: true,
-    issues: ['license_mismatch'],
+    clientSafetyStatus: 'notified',
+    clientSafetyNotifyTime: addHours(nowIso, -1.5),
+    clientSafetyNotifyPerson: '项目经理',
+    issues: [],
   },
   {
     id: uuidv4(),
@@ -170,16 +259,17 @@ const sampleRisks: RiskRecord[] = [
     description: 'B787发动机整流罩表面打磨除锈',
     workers: [samplePeople[2]],
     permitNumber: 'PT-2026-0617-003',
-    permitExpiry: '2026-06-18T12:00:00',
+    permitExpiry: addHours(nowIso, 28),
     isolationMeasures:
       '1. 佩戴防尘面罩；2. 设置吸尘设备；3. 防火花飞溅挡板',
-    estimatedEndTime: '2026-06-17T16:00:00',
+    estimatedEndTime: addHours(nowIso, 7),
     riskLevel: 'medium',
     status: 'not_started',
     team: '打磨组',
     createdBy: '王芳',
-    createdAt: '2026-06-17T09:00:00',
+    createdAt: nowIso,
     needClientSafety: false,
+    clientSafetyStatus: 'not_required',
     issues: [],
   },
   {
@@ -194,20 +284,20 @@ const sampleRisks: RiskRecord[] = [
     description: 'A330外部深度清洗，使用化学清洗剂',
     workers: [samplePeople[2]],
     permitNumber: 'PT-2026-0617-004',
-    permitExpiry: '2026-06-17T14:00:00',
+    permitExpiry: addHours(nowIso, 5),
     isolationMeasures:
       '1. 佩戴防护手套和护目镜；2. 设置防滑警示；3. 清洗剂回收处理',
-    estimatedEndTime: '2026-06-17T13:00:00',
+    estimatedEndTime: addHours(nowIso, 4),
+    actualEndTime: addHours(nowIso, 3.8),
     riskLevel: 'medium',
     status: 'closed',
     team: '清洗组',
     createdBy: '王芳',
-    createdAt: '2026-06-17T07:00:00',
+    createdAt: nowIso,
     reviewedBy: '项目经理',
-    reviewedAt: '2026-06-17T07:30:00',
-    actualEndTime: '2026-06-17T12:45:00',
+    reviewedAt: nowIso,
     needClientSafety: false,
-    clientSafetyNotified: false,
+    clientSafetyStatus: 'not_required',
     issues: [],
   },
   {
@@ -223,33 +313,52 @@ const sampleRisks: RiskRecord[] = [
     workers: [samplePeople[3]],
     permitNumber: '',
     isolationMeasures: '暂无',
-    estimatedEndTime: '2026-06-17T20:00:00',
+    estimatedEndTime: addHours(nowIso, -1),
     riskLevel: 'critical',
     status: 'not_started',
     team: '喷漆二组',
     createdBy: '刘洋',
-    createdAt: '2026-06-17T09:30:00',
+    createdAt: nowIso,
     needClientSafety: true,
-    issues: ['no_permit', 'permit_expiring', 'out_of_scope'],
+    clientSafetyStatus: 'absent',
+    clientSafetyNotifyTime: addHours(nowIso, -3),
+    clientSafetyNotifyPerson: '项目经理',
+    clientSafetyAbsentReason: '客户安全员临时参加安全会议，无法到场，已电话沟通授权',
+    issues: ['out_of_scope'],
   },
 ]
+
+// 对示例数据应用自动问题检测
+sampleRisks.forEach((r) => {
+  r.issues = detectIssuesAuto(r)
+  // 保留手工的 out_of_scope
+  if (!r.issues.includes('out_of_scope') && r.workType === 'painting' && !r.permitNumber) {
+    // 由 detectIssuesAuto 处理
+  }
+})
 
 interface StoreState extends AppState {
   selectedAirlineId: string | null
   selectedBaseId: string | null
   selectedContractId: string | null
   selectedDate: string
-  currentView: 'project' | 'fill' | 'report'
+  currentView: 'project' | 'fill' | 'report' | 'report-print'
   selectedRiskId: string | null
+  batchMode: boolean
+
   setSelectedAirlineId: (id: string | null) => void
   setSelectedBaseId: (id: string | null) => void
   setSelectedContractId: (id: string | null) => void
   setSelectedDate: (date: string) => void
-  setCurrentView: (view: 'project' | 'fill' | 'report') => void
+  setCurrentView: (view: 'project' | 'fill' | 'report' | 'report-print') => void
   setSelectedRiskId: (id: string | null) => void
-  addRisk: (risk: Omit<RiskRecord, 'id' | 'createdAt'>) => void
+  setBatchMode: (on: boolean) => void
+
+  addRisk: (risk: Omit<RiskRecord, 'id' | 'createdAt'>) => RiskRecord
   updateRisk: (id: string, updates: Partial<RiskRecord>) => void
   deleteRisk: (id: string) => void
+
+  getFilteredRisks: () => RiskRecord[]
 }
 
 export const useStore = create<StoreState>()(
@@ -260,40 +369,106 @@ export const useStore = create<StoreState>()(
       contracts: sampleContracts,
       risks: sampleRisks,
       people: samplePeople,
-      selectedAirlineId: null,
-      selectedBaseId: null,
+      selectedAirlineId: 'al-1',
+      selectedBaseId: 'base-1',
       selectedContractId: null,
       selectedDate: today,
       currentView: 'project',
       selectedRiskId: null,
+      batchMode: false,
+
       setSelectedAirlineId: (id) =>
-        set({ selectedAirlineId: id, selectedContractId: null }),
+        set({ selectedAirlineId: id, selectedContractId: null, selectedRiskId: null }),
       setSelectedBaseId: (id) =>
-        set({ selectedBaseId: id, selectedContractId: null }),
-      setSelectedContractId: (id) => set({ selectedContractId: id }),
-      setSelectedDate: (date) => set({ selectedDate: date }),
+        set({ selectedBaseId: id, selectedContractId: null, selectedRiskId: null }),
+      setSelectedContractId: (id) =>
+        set({ selectedContractId: id, selectedRiskId: null }),
+      setSelectedDate: (date) => set({ selectedDate: date, selectedRiskId: null }),
       setCurrentView: (view) => set({ currentView: view }),
       setSelectedRiskId: (id) => set({ selectedRiskId: id }),
-      addRisk: (risk) =>
+      setBatchMode: (on) => set({ batchMode: on }),
+
+      addRisk: (riskInput) => {
+        // 自动检测问题
+        const issues = detectIssuesAuto(riskInput)
+        // 修正客户安全员状态
+        const clientSafetyStatus: ClientSafetyStatus =
+          riskInput.clientSafetyStatus ||
+          getDefaultClientSafetyStatus(riskInput.needClientSafety)
+        const final: RiskRecord = {
+          ...riskInput,
+          id: uuidv4(),
+          createdAt: new Date().toISOString(),
+          issues,
+          clientSafetyStatus,
+        }
         set((state) => ({
-          risks: [
-            { ...risk, id: uuidv4(), createdAt: new Date().toISOString() },
-            ...state.risks,
-          ],
-        })),
+          risks: [final, ...state.risks],
+        }))
+        return final
+      },
+
       updateRisk: (id, updates) =>
         set((state) => ({
-          risks: state.risks.map((r) =>
-            r.id === id ? { ...r, ...updates } : r
-          ),
+          risks: state.risks.map((r) => {
+            if (r.id !== id) return r
+            const merged = { ...r, ...updates }
+            // 如果变更了与问题相关的字段，重新自动检测
+            const relatedFields = [
+              'workType',
+              'permitNumber',
+              'permitExpiry',
+              'status',
+              'estimatedEndTime',
+              'workers',
+              'issues',
+            ]
+            const shouldReDetect = relatedFields.some((f) =>
+              Object.prototype.hasOwnProperty.call(updates, f)
+            )
+            if (shouldReDetect) {
+              merged.issues = detectIssuesAuto(merged)
+            }
+            // 修正客户安全员状态
+            if (Object.prototype.hasOwnProperty.call(updates, 'needClientSafety')) {
+              if (!merged.needClientSafety) {
+                merged.clientSafetyStatus = 'not_required'
+              } else if (
+                !merged.clientSafetyStatus ||
+                merged.clientSafetyStatus === 'not_required'
+              ) {
+                merged.clientSafetyStatus = 'pending_notify'
+              }
+            }
+            return merged
+          }),
         })),
+
       deleteRisk: (id) =>
         set((state) => ({
           risks: state.risks.filter((r) => r.id !== id),
+          selectedRiskId: state.selectedRiskId === id ? null : state.selectedRiskId,
         })),
+
+      getFilteredRisks: () => {
+        const {
+          risks,
+          selectedDate,
+          selectedAirlineId,
+          selectedBaseId,
+          selectedContractId,
+        } = get()
+        return risks.filter((r) => {
+          if (r.date !== selectedDate) return false
+          if (selectedAirlineId && r.airlineId !== selectedAirlineId) return false
+          if (selectedBaseId && r.baseId !== selectedBaseId) return false
+          if (selectedContractId && r.contractId !== selectedContractId) return false
+          return true
+        })
+      },
     }),
     {
-      name: 'mro-risk-daily-storage',
+      name: 'mro-risk-daily-storage-v2',
       partialize: (state) => ({
         risks: state.risks,
         selectedAirlineId: state.selectedAirlineId,
